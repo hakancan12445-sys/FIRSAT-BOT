@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """İndirim sitelerini tarar, seçtiğin kategorilerdeki fırsatları Telegram'a gönderir.
 
-Fırsatları fotoğrafıyla gönderir; gönderilenleri seen_deals.json'a yazar (GitHub önbelleği taşır, depoya yazılmaz).
+Telegram fırsat kanallarını (ve RSS siteleri) tarar, fotoğrafıyla gönderir; gönderilenleri seen_deals.json'a yazar (GitHub önbelleği taşır, depoya yazılmaz).
 """
 import html
 import json
@@ -20,12 +20,18 @@ from zoneinfo import ZoneInfo
 
 TR = ZoneInfo("Europe/Istanbul")
 
-# Kaynaklar: ana sayfa ya da doğrudan RSS adresi yazabilirsin.
-# Bot ana sayfadan RSS adresini kendisi bulmaya çalışır.
+# 1) Telegram'daki herkese açık fırsat kanalları. Sadece kanal adını yaz
+#    (t.me/ornekkanal -> "ornekkanal"). Kanalların "t.me/s/kanaladi"
+#    adresi tarayıcıda açılıyorsa bot okuyabilir.
+CHANNELS = {
+    "İndirim Bakanlığı": "indirimbakanligi",
+    # "Başka Kanal": "kanal_adi",
+}
+
+# 2) İstersen RSS'i olan siteler de eklenebilir (ana sayfa ya da RSS adresi).
+#    Bot ana sayfadan RSS adresini bulmaya çalışır.
 SITES = {
-    "Taze Fırsat": "https://tazefirsat.com",
-    "FırsatZ": "https://firsatz.com",
-    "İndirim Bakanlığı": "https://indirimbakanligi.com",
+    # "Site Adı": "https://ornek-site.com",
 }
 
 # Başlıkta kelime BAŞI eşleşmesi aranır ("kulaklık" -> kulaklığı, kulaklıklar...)
@@ -55,9 +61,9 @@ MIN_DISCOUNT = 0
 # ve etiketlere bakılır). Tüm mağazalar için REQUIRE_STORE = False yap.
 REQUIRE_STORE = True
 STORES = {
-    "Amazon": ["amazon"],
-    "Trendyol": ["trendyol"],
-    "Hepsiburada": ["hepsiburada"],
+    "Amazon": ["amazon", "amzn"],
+    "Trendyol": ["trendyol", "ty.gl"],
+    "Hepsiburada": ["hepsiburada", "hb.biz"],
     "MediaMarkt": ["mediamarkt", "media markt"],
     "Teknosa": ["teknosa"],
     "n11": ["n11"],
@@ -219,9 +225,41 @@ def parse_feed(xml_bytes):
         if title and link:
             text = re.sub(r"<[^>]+>", " ", html.unescape(body))
             items.append({
-                "title": title, "link": link, "dt": parse_date(raw),
-                "image": image, "hay": f"{title} {text} {link}",
+                "id": link, "title": title, "link": link, "dt": parse_date(raw),
+                "image": image, "hay": f"{title} {text} {link}", "cat_text": title,
             })
+    return items
+
+
+def parse_channel(page, handle):
+    """t.me/s/<kanal> sayfasındaki gönderileri okur."""
+    items = []
+    for chunk in page.split("tgme_widget_message_wrap")[1:]:
+        m = re.search(r'data-post="([^"]+)"', chunk)
+        if not m:
+            continue
+        post = m.group(1)
+        t = re.search(r'<time[^>]+datetime="([^"]+)"', chunk)
+        dt = parse_date(t.group(1)) if t else None
+        tm = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', chunk, re.S)
+        raw = tm.group(1) if tm else ""
+        hrefs = [html.unescape(h) for h in re.findall(r'href="([^"]+)"', raw)
+                 if h.startswith("http") and "t.me/" not in h]
+        text = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
+        text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+        lines = [" ".join(l.split()) for l in text.split("\n")]
+        lines = [l for l in lines if l]
+        if not lines:
+            continue
+        title = next((l for l in lines if len(re.sub(r"\W", "", l)) > 3), lines[0])[:180]
+        img = re.search(r"tgme_widget_message_photo_wrap[^>]*background-image:url\('([^']+)'\)", chunk)
+        body = " ".join(lines)
+        items.append({
+            "id": f"p:{post}", "title": title,
+            "link": hrefs[0] if hrefs else f"https://t.me/{post}",
+            "dt": dt, "image": (html.unescape(img.group(1)) if img and img.group(1).startswith("http") else ""),
+            "hay": f"{body} {' '.join(hrefs)}", "cat_text": body[:500],
+        })
     return items
 
 
@@ -236,14 +274,23 @@ def save_seen(seen):
     STATE_FILE.write_text(json.dumps(seen[-MAX_SEEN:], ensure_ascii=False), encoding="utf-8")
 
 
+def load_sources():
+    """(kaynak_adı, adres, okuyucu_fonksiyon) üretir."""
+    for name, handle in CHANNELS.items():
+        yield name, f"t.me/{handle}", lambda h=handle: ("t.me/s/" + h, parse_channel(
+            fetch("https://t.me/s/" + h).decode("utf-8", "replace"), h))
+    for name, site in SITES.items():
+        yield name, site, lambda s_=site: (lambda fd: (fd[0], parse_feed(fd[1])))(get_feed(s_))
+
+
 def collect(seen):
     seen_set = set(seen)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=WINDOW_HOURS)
-    deals, failed = [], 0
-    for source, site in SITES.items():
+    deals, failed, total_sources = [], 0, 0
+    for source, _, reader in load_sources():
+        total_sources += 1
         try:
-            feed_url, data = get_feed(site)
-            items = parse_feed(data)
+            feed_url, items = reader()
         except Exception as exc:
             failed += 1
             print(f"[uyarı] {source} alınamadı: {exc}", file=sys.stderr)
@@ -257,21 +304,21 @@ def collect(seen):
                 break
             if it["dt"] is None or it["dt"] < cutoff:
                 continue
-            cat = category_of(it["title"])
+            cat = category_of(it["cat_text"])
             store = store_of(it["hay"])
             tk = title_key(it["title"])
             if not cat or not discount_ok(it["title"]):
                 continue
             if REQUIRE_STORE and not store:
                 continue
-            if it["link"] in seen_set or tk in seen_set:
+            if it["id"] in seen_set or tk in seen_set:
                 continue
-            seen_set.update((it["link"], tk))
-            deals.append({**it, "cat": cat, "store": store, "source": source, "keys": (it["link"], tk)})
+            seen_set.update((it["id"], tk))
+            deals.append({**it, "cat": cat, "store": store, "source": source, "keys": (it["id"], tk)})
             picked += 1
         print(f"{source} ({feed_url}): {len(items)} kayıt tarandı, {picked} fırsat.")
     deals.sort(key=lambda d: d["dt"])  # en yeni en altta
-    return deals, failed
+    return deals, failed, total_sources
 
 
 def caption_of(d):
@@ -326,8 +373,10 @@ def main():
         print("Test mesajı gönderildi.")
         return
 
-    deals, failed = collect(load_seen())
-    if failed == len(SITES):
+    deals, failed, total_sources = collect(load_seen())
+    if total_sources == 0:
+        sys.exit("CHANNELS ve SITES boş, en az bir kaynak ekle.")
+    if failed == total_sources:
         sys.exit("Hiçbir kaynağa ulaşılamadı.")
     if not deals:
         print("Yeni fırsat yok, mesaj gönderilmedi.")
@@ -350,5 +399,4 @@ def main():
     print(f"{len(sent) // 2} fırsat gönderildi.")
 
 
-if __name__ == "__main__":
-    main()
+if
