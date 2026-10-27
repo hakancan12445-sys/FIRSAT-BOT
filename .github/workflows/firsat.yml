@@ -1,0 +1,38 @@
+name: Firsat botu
+
+on:
+  schedule:
+    - cron: "15 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Sadece Telegram bağlantısını test et"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  firsat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gönderilenleri hatırla
+        uses: actions/cache@v4
+        with:
+          path: seen_deals.json
+          key: seen-deals-${{ github.run_id }}
+          restore-keys: seen-deals-
+
+      - name: Fırsatları gönder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST: ${{ inputs.test }}
+        run: python firsat_bot.py
