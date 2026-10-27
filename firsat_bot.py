@@ -70,8 +70,8 @@ STORES = {
 }
 
 WINDOW_HOURS = 10     # 3 saatte bir çalışır; zamanlayıcı kayarsa kaçmasın
-MAX_PER_FEED = 10
-MAX_TOTAL = 15        # tek turda en fazla kaç fırsat (Telegram'ı boğmasın)
+MAX_PER_FEED = 20     # Tek kaynaktan maksimum kaç fırsat alalım
+MAX_TOTAL = 30       # Tek turda toplam maksimum kaç fırsat gönderelim
 MAX_SEEN = 3000
 CHUNK_LIMIT = 3800
 STATE_FILE = Path(__file__).with_name("seen_deals.json")
