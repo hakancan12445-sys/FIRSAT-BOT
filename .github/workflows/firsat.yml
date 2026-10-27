@@ -2,7 +2,7 @@ name: Firsat botu
 
 on:
   schedule:
-    - cron: "cron: "0 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       test:
