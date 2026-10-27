@@ -399,4 +399,5 @@ def main():
     print(f"{len(sent) // 2} fırsat gönderildi.")
 
 
-if
+if __name__ == "__main__":
+    main()
